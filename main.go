@@ -31,7 +31,6 @@ func main() {
 	}
 	r := rand.New(rand.NewSource(0))
 	gs := gsort.New(1 << 20)
-	defer gs.Free()
 	sb := rl.LoadShaderBuffer((1<<20)*4, nil, rl.DynamicCopy)
 	defer rl.UnloadShaderBuffer(sb)
 	defer gs.Free()

@@ -33,14 +33,12 @@ void main()
     uint gelem_id     = global_id * 2;
     uint base_id      = workgroup_id * WORKGROUP_ITEMS;
 
+    // Initialize v1 and v2 to values outside of range [0,3] to prevent counting them as 0, 1, 2 or 3,
+    // in case input data size is not aligned to WORKGROUP_ITEMS.
     uint v1 = 4;
     uint v2 = 4;
-    if (gelem_id < n_input) {
-        v1 = ((input[gelem_id] >> offset) & 0x3u);
-    }
-    if (gelem_id + 1 < n_input) {
-        v2 = ((input[gelem_id + 1] >> offset) & 0x3u);
-    }
+    if (gelem_id     < n_input) v1 = ((input[gelem_id    ] >> offset) & 0x3u);
+    if (gelem_id + 1 < n_input) v2 = ((input[gelem_id + 1] >> offset) & 0x3u);
 
     uvec4 bit_sum1 = uvec4(0u);
     uvec4 bit_sum2 = uvec4(0u);

@@ -57,9 +57,6 @@ void main()
     pos1 += block1;
     pos2 += block2;
 
-    // if (gelem_id     < n_input) output_data[gelem_id    ] = pos1;
-    // if (gelem_id + 1 < n_input) output_data[gelem_id + 1] = pos2;
     if (gelem_id     < n_input && pos1 < n_input) output_data[pos1] = v1;
     if (gelem_id + 1 < n_input && pos2 < n_input) output_data[pos2] = v2;
-
 }
