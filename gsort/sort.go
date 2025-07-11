@@ -1,7 +1,6 @@
 // Package gsort provides GPU accelerated stable sorting on uint32 keys.
 //
-// GPU accelerations relies on OpenGL compute shaders and requires O(n) storage for sorting. Current implementation can
-// handle non power of two sizes for values, but still requires next power of two amount of storage
+// GPU acceleration relies on OpenGL compute shaders and requires O(n) storage for sorting.
 //
 // Sorting algorithm uses radix sort as described in paper "Fast 4-way parallel radix sorting on GPUs" [1], with slight modifications
 // and simplifications. Sorting also relies on calculating prefix sums for arbitrarily large data. For prefix sum calculations,
@@ -52,9 +51,7 @@ func init() {
 	shaderTemplate = template.Must(shaderTemplate.New("shaders/scatter.glsl").Parse(scatterShader))
 }
 
-const valuesPerWorkGroup = 256
-
-type PrefixSum struct {
+type RadixSort struct {
 	shaderRadixScan                   uint32
 	shaderRadixScanUniformInput       int32
 	shaderRadixScanUniformWorkGroups  int32
@@ -70,19 +67,20 @@ type PrefixSum struct {
 	shaderScatterUniformInput         int32
 	shaderScatterUniformOffset        int32
 	shaderScatterUniformWorkGroups    int32
-	InputBuffer                       uint32
-	LocalPrefixBuffer                 uint32
-	BlockSumBuffer                    uint32
+	inputBuffer                       uint32
+	localPrefixBuffer                 uint32
+	blockSumBuffer                    uint32
+	valuesPerWorkGroup                uint32
 }
 
-type ShaderSettings struct {
-	WorkGroupItems int
-	WorkGroupSize  int
+type shaderSettings struct {
+	WorkGroupItems uint32
+	WorkGroupSize  uint32
 }
 
-func loadShader(name string) uint32 {
+func loadShader(name string, valuesPerWorkGroup uint32) uint32 {
 	var buf bytes.Buffer
-	if err := shaderTemplate.ExecuteTemplate(&buf, name, ShaderSettings{
+	if err := shaderTemplate.ExecuteTemplate(&buf, name, shaderSettings{
 		WorkGroupItems: valuesPerWorkGroup,
 		WorkGroupSize:  valuesPerWorkGroup / 2,
 	}); err != nil {
@@ -96,21 +94,51 @@ func loadShader(name string) uint32 {
 	return shaderProg
 }
 
-func New(capacity uint32) *PrefixSum {
-	capacity = multipleOf(capacity, valuesPerWorkGroup)
+type SortSettings struct {
+	Capacity           uint32
+	ValuesPerWorkGroup uint32
+}
+
+func NewSettings(cap uint32) SortSettings {
+	return SortSettings{
+		Capacity: cap,
+	}
+}
+
+func (settings SortSettings) WithValuesPerWorkGroup(count uint32) SortSettings {
+	settings.ValuesPerWorkGroup = count
+	return settings
+}
+
+func (settings SortSettings) getValuesPerWorkGroup() uint32 {
+	if settings.ValuesPerWorkGroup == 0 {
+		return 256
+	}
+	return nextPow2(settings.ValuesPerWorkGroup)
+}
+func (settings SortSettings) getCapacity() uint32 {
+	if settings.Capacity == 0 {
+		panic("SortSettings.Capacity must be defined")
+	}
+	return multipleOf(settings.Capacity, settings.getValuesPerWorkGroup())
+}
+
+func New(settings SortSettings) *RadixSort {
+	valuesPerWorkGroup := settings.getValuesPerWorkGroup()
+	capacity := settings.getCapacity()
 	log.Printf("capacity: %d", capacity)
-	radixScanProg := loadShader("shaders/radix_scan.glsl")
+	radixScanProg := loadShader("shaders/radix_scan.glsl", valuesPerWorkGroup)
 	shaderRadixScanUniformInput := rl.GetLocationUniform(radixScanProg, "n_input")
 	shaderRadixScanUniformWorkGroups := rl.GetLocationUniform(radixScanProg, "n_workgroups")
 	shaderRadixScanUniformOffset := rl.GetLocationUniform(radixScanProg, "offset")
-	prefixSumProg := loadShader("shaders/prefix_sum.glsl")
+	prefixSumProg := loadShader("shaders/prefix_sum.glsl", valuesPerWorkGroup)
 	shaderPrefixSumUniformInput := rl.GetLocationUniform(prefixSumProg, "n_input")
 	shaderPrefixSumUniformInputOffset := rl.GetLocationUniform(prefixSumProg, "input_offset")
 	shaderPrefixSumUniformSumOffset := rl.GetLocationUniform(prefixSumProg, "sum_offset")
-	addBlockProg := loadShader("shaders/add_block.glsl")
+	addBlockProg := loadShader("shaders/add_block.glsl", valuesPerWorkGroup)
 	shaderAddBlockUniformInputOffset := rl.GetLocationUniform(addBlockProg, "input_offset")
 	shaderAddBlockUniformSumOffset := rl.GetLocationUniform(addBlockProg, "sum_offset")
-	scatterProg := loadShader("shaders/scatter.glsl")
+	scatterProg := loadShader("shaders/scatter.glsl", valuesPerWorkGroup)
 	shaderScatterUniformInput := rl.GetLocationUniform(scatterProg, "n_input")
 	shaderScatterUniformWorkGroups := rl.GetLocationUniform(scatterProg, "n_workgroups")
 	shaderScatterUniformOffset := rl.GetLocationUniform(scatterProg, "offset")
@@ -119,7 +147,7 @@ func New(capacity uint32) *PrefixSum {
 	localPrefix := rl.LoadShaderBuffer(capacity*4, nil, rl.DynamicCopy)
 	blockSum := rl.LoadShaderBuffer(max(nextPow2(capacity)/valuesPerWorkGroup, valuesPerWorkGroup)*4*2*4, nil, rl.DynamicCopy)
 
-	return &PrefixSum{
+	return &RadixSort{
 		shaderRadixScan:                   radixScanProg,
 		shaderRadixScanUniformInput:       shaderRadixScanUniformInput,
 		shaderRadixScanUniformWorkGroups:  shaderRadixScanUniformWorkGroups,
@@ -135,21 +163,21 @@ func New(capacity uint32) *PrefixSum {
 		shaderScatterUniformInput:         shaderScatterUniformInput,
 		shaderScatterUniformOffset:        shaderScatterUniformOffset,
 		shaderScatterUniformWorkGroups:    shaderScatterUniformWorkGroups,
-		InputBuffer:                       input,
-		LocalPrefixBuffer:                 localPrefix,
-		BlockSumBuffer:                    blockSum,
+		inputBuffer:                       input,
+		localPrefixBuffer:                 localPrefix,
+		blockSumBuffer:                    blockSum,
+		valuesPerWorkGroup:                valuesPerWorkGroup,
 	}
 }
 
-func (pfs *PrefixSum) Sort(input_buf uint32, length int) {
+func (pfs *RadixSort) Sort(input_buf uint32, length int) {
 	dataLen := uint32(length)
-	dataLenMultiple := multipleOf(dataLen, valuesPerWorkGroup)
-	workGroups := dataLenMultiple / valuesPerWorkGroup
-	log.Printf("Dispatching %d workgroups, Data length %d (%d), values per workgroup %d", workGroups, dataLen, dataLenMultiple, valuesPerWorkGroup)
+	dataLenMultiple := multipleOf(dataLen, pfs.valuesPerWorkGroup)
+	workGroups := dataLenMultiple / pfs.valuesPerWorkGroup
 
 	var offset uint32
 	buffer1 := input_buf
-	buffer2 := pfs.InputBuffer
+	buffer2 := pfs.inputBuffer
 	for offset = 0; offset < 32; offset += 2 {
 		// Scan the input and build local prefix sum for each block, and build block sum 4*workgroups large.
 		// Block sum contains count of each possible digit 0-3 layed out as
@@ -164,8 +192,8 @@ func (pfs *PrefixSum) Sort(input_buf uint32, length int) {
 		rl.SetUniform(pfs.shaderRadixScanUniformWorkGroups, uniformValues(workGroups), int32(rl.ShaderUniformUint))
 		rl.SetUniform(pfs.shaderRadixScanUniformOffset, uniformValues(offset), int32(rl.ShaderUniformUint))
 		rl.BindShaderBuffer(buffer1, 1)
-		rl.BindShaderBuffer(pfs.LocalPrefixBuffer, 2)
-		rl.BindShaderBuffer(pfs.BlockSumBuffer, 3)
+		rl.BindShaderBuffer(pfs.localPrefixBuffer, 2)
+		rl.BindShaderBuffer(pfs.blockSumBuffer, 3)
 		rl.ComputeShaderDispatch(workGroups, 1, 1)
 		rl.DisableShader()
 		gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT)
@@ -183,8 +211,8 @@ func (pfs *PrefixSum) Sort(input_buf uint32, length int) {
 		rl.SetUniform(pfs.shaderScatterUniformOffset, uniformValues(offset), int32(rl.ShaderUniformUint))
 		rl.BindShaderBuffer(buffer1, 1)
 		rl.BindShaderBuffer(buffer2, 2)
-		rl.BindShaderBuffer(pfs.LocalPrefixBuffer, 3)
-		rl.BindShaderBuffer(pfs.BlockSumBuffer, 4)
+		rl.BindShaderBuffer(pfs.localPrefixBuffer, 3)
+		rl.BindShaderBuffer(pfs.blockSumBuffer, 4)
 		rl.ComputeShaderDispatch(workGroups, 1, 1)
 		rl.DisableShader()
 		gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT)
@@ -199,66 +227,66 @@ func multipleOf(x, multiple uint32) uint32 {
 	return x
 }
 
-func (pfs *PrefixSum) prefixSum(workGroups uint32) {
-	initialSize := nextPow2(multipleOf(workGroups*4, valuesPerWorkGroup))
+func (pfs *RadixSort) prefixSum(workGroups uint32) {
+	initialSize := nextPow2(multipleOf(workGroups*4, pfs.valuesPerWorkGroup))
 	sumBufferSize := initialSize
 	sumBufferOffset := uint32(0)
 	sumBufferSumOffset := sumBufferSize
 	inputDataSize := workGroups * 4
 
-	for sumBufferSize >= valuesPerWorkGroup {
+	for sumBufferSize >= pfs.valuesPerWorkGroup {
 		pfs.prefixSumIteration(sumBufferSize, sumBufferOffset, sumBufferSumOffset, inputDataSize)
 		sumBufferOffset += sumBufferSize
-		sumBufferSumOffset = sumBufferOffset + (sumBufferSize / valuesPerWorkGroup)
-		sumBufferSize /= valuesPerWorkGroup
+		sumBufferSumOffset = sumBufferOffset + (sumBufferSize / pfs.valuesPerWorkGroup)
+		sumBufferSize /= pfs.valuesPerWorkGroup
 		inputDataSize = sumBufferSize
 	}
-	if initialSize <= valuesPerWorkGroup {
+	if initialSize <= pfs.valuesPerWorkGroup {
 		return
 	}
 	pfs.prefixSumIteration(sumBufferSize, sumBufferOffset, sumBufferSumOffset, sumBufferSize)
-	sumBufferSize *= valuesPerWorkGroup
+	sumBufferSize *= pfs.valuesPerWorkGroup
 	sumBufferOffset -= sumBufferSize
 	sumBufferSumOffset = sumBufferOffset + (sumBufferSize)
 
 	for sumBufferSize <= initialSize {
 		pfs.addBlockIteration(sumBufferSize, sumBufferOffset, sumBufferSumOffset)
-		sumBufferSize *= valuesPerWorkGroup
+		sumBufferSize *= pfs.valuesPerWorkGroup
 		sumBufferOffset -= sumBufferSize
 		sumBufferSumOffset = sumBufferOffset + (sumBufferSize)
 	}
 }
 
-func (pfs *PrefixSum) prefixSumIteration(sumBufferSize uint32, sumBufferOffset uint32, sumBufferSumOffset uint32, dataLenth uint32) {
+func (pfs *RadixSort) prefixSumIteration(sumBufferSize uint32, sumBufferOffset uint32, sumBufferSumOffset uint32, dataLenth uint32) {
 	rl.EnableShader(pfs.shaderPrefixSum)
 	rl.SetUniform(pfs.shaderPrefixSumUniformInput, uniformValues(dataLenth), int32(rl.ShaderUniformUint))
 	rl.SetUniform(pfs.shaderPrefixSumUniformInputOffset, uniformValues(sumBufferOffset), int32(rl.ShaderUniformUint))
 	rl.SetUniform(pfs.shaderPrefixSumUniformSumOffset, uniformValues(sumBufferSumOffset), int32(rl.ShaderUniformUint))
-	rl.BindShaderBuffer(pfs.BlockSumBuffer, 1)
-	rl.ComputeShaderDispatch(max(sumBufferSize/valuesPerWorkGroup, 1), 1, 1)
+	rl.BindShaderBuffer(pfs.blockSumBuffer, 1)
+	rl.ComputeShaderDispatch(max(sumBufferSize/pfs.valuesPerWorkGroup, 1), 1, 1)
 	rl.DisableShader()
 	gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT)
 }
 
-func (pfs *PrefixSum) addBlockIteration(sumBufferSize uint32, sumBufferOffset uint32, sumBufferSumOffset uint32) {
+func (pfs *RadixSort) addBlockIteration(sumBufferSize uint32, sumBufferOffset uint32, sumBufferSumOffset uint32) {
 	rl.EnableShader(pfs.shaderAddBlock)
 	rl.SetUniform(pfs.shaderAddBlockUniformInputOffset, uniformValues(sumBufferOffset), int32(rl.ShaderUniformUint))
 	rl.SetUniform(pfs.shaderAddBlockUniformSumOffset, uniformValues(sumBufferSumOffset), int32(rl.ShaderUniformUint))
-	rl.BindShaderBuffer(pfs.BlockSumBuffer, 1)
-	rl.ComputeShaderDispatch(max(sumBufferSize/valuesPerWorkGroup, 1), 1, 1)
+	rl.BindShaderBuffer(pfs.blockSumBuffer, 1)
+	rl.ComputeShaderDispatch(max(sumBufferSize/pfs.valuesPerWorkGroup, 1), 1, 1)
 	rl.DisableShader()
 	gl.MemoryBarrier(gl.SHADER_STORAGE_BARRIER_BIT)
 }
 
-func (pfs *PrefixSum) Free() {
+func (pfs *RadixSort) Free() {
 	rl.UnloadShaderProgram(pfs.shaderRadixScan)
 	rl.UnloadShaderProgram(pfs.shaderPrefixSum)
 	rl.UnloadShaderProgram(pfs.shaderAddBlock)
 	rl.UnloadShaderProgram(pfs.shaderScatter)
 
-	rl.UnloadShaderBuffer(pfs.InputBuffer)
-	rl.UnloadShaderBuffer(pfs.BlockSumBuffer)
-	rl.UnloadShaderBuffer(pfs.LocalPrefixBuffer)
+	rl.UnloadShaderBuffer(pfs.inputBuffer)
+	rl.UnloadShaderBuffer(pfs.blockSumBuffer)
+	rl.UnloadShaderBuffer(pfs.localPrefixBuffer)
 }
 
 func nextPow2(v uint32) uint32 {
