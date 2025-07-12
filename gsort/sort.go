@@ -76,14 +76,13 @@ type RadixSort struct {
 type shaderSettings struct {
 	WorkGroupItems uint32
 	WorkGroupSize  uint32
+	PaddingBefore  uint32
+	PaddingAfter   uint32
 }
 
-func loadShader(name string, valuesPerWorkGroup uint32) uint32 {
+func loadShader(name string, settings shaderSettings) uint32 {
 	var buf bytes.Buffer
-	if err := shaderTemplate.ExecuteTemplate(&buf, name, shaderSettings{
-		WorkGroupItems: valuesPerWorkGroup,
-		WorkGroupSize:  valuesPerWorkGroup / 2,
-	}); err != nil {
+	if err := shaderTemplate.ExecuteTemplate(&buf, name, settings); err != nil {
 		panic(fmt.Sprintf("failed to parse embedded shader %v template: %v", name, err))
 	}
 	shader := rl.CompileShader(buf.String(), rl.ComputeShader)
@@ -95,8 +94,17 @@ func loadShader(name string, valuesPerWorkGroup uint32) uint32 {
 }
 
 type SortSettings struct {
-	Capacity           uint32
+	// Capacity of internal buffer in bytes, must be disible by InputDataSize.
+	Capacity uint32
+	// Number values handled by single single work group.
+	// Default value: 256
 	ValuesPerWorkGroup uint32
+	// Size of a single input data in bytes, must be divisible by 4.
+	// Default value: 4
+	InputDataSize uint32
+	// Bytes of padding before the key in bytes, must be divisible by 4
+	// Default value: 0
+	KeyOffset uint32
 }
 
 func NewSettings(cap uint32) SortSettings {
@@ -110,12 +118,23 @@ func (settings SortSettings) WithValuesPerWorkGroup(count uint32) SortSettings {
 	return settings
 }
 
+func (settings SortSettings) WithInputDataSize(size uint32) SortSettings {
+	settings.InputDataSize = size
+	return settings
+}
+
+func (settings SortSettings) WithKeyOffset(offset uint32) SortSettings {
+	settings.KeyOffset = offset
+	return settings
+}
+
 func (settings SortSettings) getValuesPerWorkGroup() uint32 {
 	if settings.ValuesPerWorkGroup == 0 {
 		return 256
 	}
 	return nextPow2(settings.ValuesPerWorkGroup)
 }
+
 func (settings SortSettings) getCapacity() uint32 {
 	if settings.Capacity == 0 {
 		panic("SortSettings.Capacity must be defined")
@@ -123,29 +142,60 @@ func (settings SortSettings) getCapacity() uint32 {
 	return multipleOf(settings.Capacity, settings.getValuesPerWorkGroup())
 }
 
+func (settings SortSettings) getInputDataSize() uint32 {
+	if settings.KeyOffset%4 != 0 {
+		panic("KeyOffset must be divisible by 4")
+	}
+	if settings.InputDataSize == 0 {
+		return 4
+	}
+	return settings.InputDataSize
+}
+func (settings SortSettings) getKeyOffset() uint32 {
+	if settings.KeyOffset%4 != 0 {
+		panic("KeyOffset must be divisible by 4")
+	}
+	return settings.KeyOffset
+}
+
 func New(settings SortSettings) *RadixSort {
 	valuesPerWorkGroup := settings.getValuesPerWorkGroup()
 	capacity := settings.getCapacity()
-	log.Printf("capacity: %d", capacity)
-	radixScanProg := loadShader("shaders/radix_scan.glsl", valuesPerWorkGroup)
+	inputDataSize := settings.getInputDataSize()
+	keyOffset := settings.getKeyOffset()
+
+	// InputDataSize must be able to fit offset (N1 bytes) key (4 bytes)
+	if keyOffset+4 > inputDataSize {
+		panic("InputDataSize is not large enough to fit offset and key")
+	}
+	paddingAfter := inputDataSize - keyOffset - 4
+
+	internalSettings := shaderSettings{
+		WorkGroupItems: valuesPerWorkGroup,
+		WorkGroupSize:  valuesPerWorkGroup / 2,
+		PaddingBefore:  keyOffset / 4,
+		PaddingAfter:   paddingAfter / 4,
+	}
+
+	radixScanProg := loadShader("shaders/radix_scan.glsl", internalSettings)
 	shaderRadixScanUniformInput := rl.GetLocationUniform(radixScanProg, "n_input")
 	shaderRadixScanUniformWorkGroups := rl.GetLocationUniform(radixScanProg, "n_workgroups")
 	shaderRadixScanUniformOffset := rl.GetLocationUniform(radixScanProg, "offset")
-	prefixSumProg := loadShader("shaders/prefix_sum.glsl", valuesPerWorkGroup)
+	prefixSumProg := loadShader("shaders/prefix_sum.glsl", internalSettings)
 	shaderPrefixSumUniformInput := rl.GetLocationUniform(prefixSumProg, "n_input")
 	shaderPrefixSumUniformInputOffset := rl.GetLocationUniform(prefixSumProg, "input_offset")
 	shaderPrefixSumUniformSumOffset := rl.GetLocationUniform(prefixSumProg, "sum_offset")
-	addBlockProg := loadShader("shaders/add_block.glsl", valuesPerWorkGroup)
+	addBlockProg := loadShader("shaders/add_block.glsl", internalSettings)
 	shaderAddBlockUniformInputOffset := rl.GetLocationUniform(addBlockProg, "input_offset")
 	shaderAddBlockUniformSumOffset := rl.GetLocationUniform(addBlockProg, "sum_offset")
-	scatterProg := loadShader("shaders/scatter.glsl", valuesPerWorkGroup)
+	scatterProg := loadShader("shaders/scatter.glsl", internalSettings)
 	shaderScatterUniformInput := rl.GetLocationUniform(scatterProg, "n_input")
 	shaderScatterUniformWorkGroups := rl.GetLocationUniform(scatterProg, "n_workgroups")
 	shaderScatterUniformOffset := rl.GetLocationUniform(scatterProg, "offset")
 
-	input := rl.LoadShaderBuffer(capacity*4, nil, rl.DynamicCopy)
-	localPrefix := rl.LoadShaderBuffer(capacity*4, nil, rl.DynamicCopy)
-	blockSum := rl.LoadShaderBuffer(max(nextPow2(capacity)/valuesPerWorkGroup, valuesPerWorkGroup)*4*2*4, nil, rl.DynamicCopy)
+	input := rl.LoadShaderBuffer(capacity*inputDataSize, nil, rl.DynamicCopy)
+	localPrefix := rl.LoadShaderBuffer(capacity*inputDataSize, nil, rl.DynamicCopy)
+	blockSum := rl.LoadShaderBuffer(max(nextPow2(capacity)/valuesPerWorkGroup, valuesPerWorkGroup)*inputDataSize*2*4, nil, rl.DynamicCopy)
 
 	return &RadixSort{
 		shaderRadixScan:                   radixScanProg,
@@ -171,6 +221,9 @@ func New(settings SortSettings) *RadixSort {
 }
 
 func (pfs *RadixSort) Sort(input_buf uint32, length int) {
+	if length <= 0 {
+		return
+	}
 	dataLen := uint32(length)
 	dataLenMultiple := multipleOf(dataLen, pfs.valuesPerWorkGroup)
 	workGroups := dataLenMultiple / pfs.valuesPerWorkGroup
@@ -178,6 +231,7 @@ func (pfs *RadixSort) Sort(input_buf uint32, length int) {
 	var offset uint32
 	buffer1 := input_buf
 	buffer2 := pfs.inputBuffer
+	log.Printf("Dispatching %d workgroups, length: %d", workGroups, dataLenMultiple)
 	for offset = 0; offset < 32; offset += 2 {
 		// Scan the input and build local prefix sum for each block, and build block sum 4*workgroups large.
 		// Block sum contains count of each possible digit 0-3 layed out as
@@ -201,7 +255,6 @@ func (pfs *RadixSort) Sort(input_buf uint32, length int) {
 		// Perform prefix sum scan of the block sum memory.
 		// This gives us indices for each digit globally two scatter on the next stage.
 		pfs.prefixSum(workGroups)
-		// printBuffer("BlockSumBuffer", pfs.BlockSumBuffer, 512, 0, 256)
 
 		// Scatter input to the output buffer based on local prefix sum (ordering between same digits within a block)
 		// and prefix summed block sum.

@@ -8,12 +8,14 @@ uniform uint n_input;
 uniform uint n_workgroups;
 uniform uint offset;
 
+{{ template "input_type" . }}
+
 layout(std430, binding = 1) buffer input_buffer {
-    uint input[];
+    InputData input[];
 };
 
 layout(std430, binding = 2) buffer output_buffer {
-    uint output_data[];
+    InputData output_data[];
 };
 
 layout(std430, binding = 3) buffer local_prefix_sum_buffer {
@@ -36,10 +38,10 @@ void main()
     uint v2 = 0u;
 
     if (gelem_id < n_input) {
-        v1 = input[gelem_id];
+        v1 = input[gelem_id].key;
     }
     if (gelem_id + 1 < n_input) {
-        v2 = input[gelem_id + 1];
+        v2 = input[gelem_id + 1].key;
     }
 
     uint b1 = (v1 >> offset) & 0x3u;
@@ -57,6 +59,6 @@ void main()
     pos1 += block1;
     pos2 += block2;
 
-    if (gelem_id     < n_input && pos1 < n_input) output_data[pos1] = v1;
-    if (gelem_id + 1 < n_input && pos2 < n_input) output_data[pos2] = v2;
+    if (gelem_id     < n_input && pos1 < n_input) output_data[pos1] = input[gelem_id    ];
+    if (gelem_id + 1 < n_input && pos2 < n_input) output_data[pos2] = input[gelem_id + 1];
 }

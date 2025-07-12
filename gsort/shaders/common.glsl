@@ -38,3 +38,27 @@ void scan(uint thread_id, out uint block_sum)
     }
 }
 {{ end }}
+
+{{ define "input_type" }}
+{{- if and (eq .PaddingBefore 0) (eq .PaddingAfter 0) }}
+struct InputData {
+    uint key;
+};
+{{- else if eq .PaddingBefore 0 }}
+struct InputData {
+    uint key;
+    uint _padding2[{{ .PaddingAfter }}];
+};
+{{- else if eq .PaddingAfter 0}}
+struct InputData {
+    uint _padding1[{{ .PaddingBefore }}];
+    uint key;
+};
+{{- else }}
+struct InputData {
+    uint _padding1[{{ .PaddingBefore }}];
+    uint key;
+    uint _padding2[{{ .PaddingAfter }}];
+};
+{{- end }}
+{{ end }}

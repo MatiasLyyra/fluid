@@ -8,8 +8,10 @@ uniform uint n_input;
 uniform uint offset;
 uniform uint n_workgroups;
 
+{{ template "input_type" . }}
+
 layout(std430, binding = 1) buffer input_data_buffer {
-    uint input[];
+    InputData input[];
 };
 
 layout(std430, binding = 2) buffer output_data_buffer {
@@ -37,8 +39,8 @@ void main()
     // in case input data size is not aligned to WORKGROUP_ITEMS.
     uint v1 = 4;
     uint v2 = 4;
-    if (gelem_id     < n_input) v1 = ((input[gelem_id    ] >> offset) & 0x3u);
-    if (gelem_id + 1 < n_input) v2 = ((input[gelem_id + 1] >> offset) & 0x3u);
+    if (gelem_id     < n_input) v1 = ((input[gelem_id    ].key >> offset) & 0x3u);
+    if (gelem_id + 1 < n_input) v2 = ((input[gelem_id + 1].key >> offset) & 0x3u);
 
     uvec4 bit_sum1 = uvec4(0u);
     uvec4 bit_sum2 = uvec4(0u);
