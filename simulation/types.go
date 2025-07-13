@@ -17,6 +17,8 @@ func (v Vector2) AsRaylib() rl.Vector2 {
 	}
 }
 
+// Modified from: https://github.com/gen2brain/raylib-go/blob/master/raylib/raymath.go
+
 func (v Vector2) Add(v2 Vector2) Vector2 {
 	return Vector2{X: v.X + v2.X, Y: v.Y + v2.Y}
 }

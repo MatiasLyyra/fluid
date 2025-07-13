@@ -1,18 +1,16 @@
 package main
 
 import (
-	"cmp"
-	"image/color"
+	"log"
 	"math"
 	"math/rand"
-	"slices"
 
 	"github.com/MatiasLyyra/fluid/simulation"
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
 const MaxNeighbours = 32
-const ParticleCount = 4096
+const ParticleCount = 1 << 14
 const Width = 768
 const Height = 768
 const Radius = 0.04
@@ -21,16 +19,47 @@ const NoNeighbour = math.MaxUint32
 
 type NeighbourList [ParticleCount * MaxNeighbours]int
 
+const vertexShader = `
+#version 430
+in vec2 vertexPosition;
+in vec2 instancePosition;
+in uint code;
+out vec2 fragPos;
+uniform mat4 mvp;
+
+void main()
+{
+	vec2 pos = vertexPosition * 4 + instancePosition;
+	gl_Position = mvp * vec4(pos, 0.0, 1.0);
+	fragPos = pos;
+}
+`
+
+const fragmentShader = `
+#version 430
+in vec2 fragPos;
+out vec4 fragColor;
+
+void main()
+{
+	vec2 center = fragPos - 4;
+	if (length(gl_FragCoord.xy - fragPos) > 4) discard;
+	fragColor = vec4(1.0);
+}
+`
+
 func HashPosition(pos, rangeLow, rangeHigh simulation.Vector2, step float32) uint32 {
-	const p1 = 73856093
-	const p2 = 19349663
+	pos = pos.Clamp(rangeLow, rangeHigh)
 	gridX := uint32((pos.X - rangeLow.X) / step)
 	gridY := uint32((pos.Y - rangeLow.Y) / step)
-	numCellsX := uint32((rangeHigh.X - rangeLow.X) / step)
-	numCellsY := uint32((rangeHigh.Y - rangeLow.X) / step)
-	gridX = max(0, min(gridX, numCellsX))
-	gridY = max(0, min(gridY, numCellsY))
-	return ((gridX * p1) ^ (gridY * p2)) % (numCellsX * numCellsY)
+	return interleave2d(gridX) | interleave2d(gridY)<<1
+}
+
+func interleave2d(v uint32) uint32 {
+	v = (v ^ (v << 8)) & 0x00ff00ff
+	v = (v ^ (v << 4)) & 0x0f0f0f0f
+	v = (v ^ (v << 2)) & 0x33333333
+	return (v ^ (v << 1)) & 0x55555555
 }
 
 func main() {
@@ -44,37 +73,20 @@ func main() {
 				Y: rand.Float32(),
 			},
 		}
-		particles[i].Code = HashPosition(particles[i].Position, simulation.Vector2{X: 0, Y: 0}, simulation.Vector2{X: 1, Y: 1}, 0.02)
+		// particles[i].Code = HashPosition(particles[i].Position, simulation.Vector2{X: 0, Y: 0}, simulation.Vector2{X: 1, Y: 1}, 0.02)
 	}
-
-	slices.SortFunc(particles, func(a, b simulation.Particle) int { return cmp.Compare(a.Code, b.Code) })
+	// slices.SortFunc(particles, func(a, b simulation.Particle) int { return cmp.Compare(a.Code, b.Code) })
 	rl.InitWindow(Width, Height, "Fluid")
 	rl.SetTargetFPS(60)
 
-	for !rl.WindowShouldClose() {
-		var maxDensity float32
-		var minDensity float32 = math.MaxFloat32
-		for i := range particles {
-			particles[i].Density = 0
-			for j := range particles {
-				if i == j {
-					continue
-				}
-				particles[i].Density += smoothingKernel(particles[i].Position.DistanceSqr(particles[j].Position), Radius)
-			}
-			maxDensity = max(maxDensity, particles[i].Density)
-			minDensity = min(minDensity, particles[i].Density)
-		}
+	shader := rl.LoadShaderFromMemory(vertexShader, fragmentShader)
+	// model := rl.LoadModelFromMesh(rl.GenMeshPlane(1, 1, 1, 1))
+	// // vertexBuffer := rl.LoadVertexArray()
+	// gl.BufferData(gl.ARRAY_BUFFER, len(particles)*int(unsafe.Sizeof(simulation.Particle{})), unsafe.Pointer(unsafe.SliceData(particles)), gl.STATIC_DRAW)
 
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.Blank)
-		for _, p := range particles {
-			c := max(20, uint8((p.Density-minDensity)/(maxDensity-minDensity)*255))
-			rl.DrawCircle(int32(p.Position.X*Width), int32(p.Position.Y*Height), 4, color.RGBA{R: c, G: c, B: c, A: 255})
-		}
-		rl.DrawFPS(10, 10)
-		rl.EndDrawing()
-	}
+	// gl.BindVertexArray(model.Meshes.VaoID)
+
+	log.Printf("Data: %+v", rl.GetShaderLocationAttrib(shader, "fragPos"))
 }
 
 func smoothingKernel(rSq, h float32) float32 {

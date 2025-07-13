@@ -16,3 +16,5 @@ require (
 	golang.org/x/sys v0.20.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/gen2brain/raylib-go/raylib => github.com/MatiasLyyra/raylib-go/raylib v0.1.0
